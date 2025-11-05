@@ -1,7 +1,4 @@
-// ============================================
-// FILE: server/server.js
-// REPLACE YOUR ENTIRE server.js WITH THIS
-// ============================================
+
 
 const express = require('express');
 const cors = require('cors');
@@ -25,10 +22,18 @@ const server = http.createServer(app);
 // Setup Socket.io with CORS
 const io = new Server(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' 
-      ? ['https://vibes-lounge.netlify.app', 'https://vibeslounge.netlify.app']
-      : 'http://localhost:3000',
-    methods: ['GET', 'POST'],
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      const allowedOrigins = [
+        process.env.FRONTEND_URL || 'https://vibeslounge.netlify.app',
+        'http://localhost:3000',
+      ];
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Socket.io CORS: Origin not allowed'));
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],  // Add OPTIONS for consistency
     credentials: true,
   },
 });
@@ -43,7 +48,29 @@ app.set('io', io);
 connectDB();
 
 // Middleware
-app.use(cors());
+// Explicit CORS config - handles preflight for prod, lenient for local
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow non-browser requests (e.g., curl, mobile)
+    if (!origin) return callback(null, true);
+    // Use FRONTEND_URL env (Render-loaded) + local fallback
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || 'https://vibeslounge.netlify.app',  // Prod Netlify
+      'https://vibes-lounge.netlify.app',  // Alt/duplicate from Socket.io
+      'http://localhost:3000',  // Local frontend
+    ];
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    console.warn(`CORS blocked origin: ${origin}`);  // Log for debugging
+    return callback(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  credentials: true,  // Supports Authorization Bearer tokens (your JWT)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],  // Explicit for preflight (OPTIONS auto-handled)
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],  // JSON + future headers
+  preflightContinue: false,  // Let cors handle OPTIONS
+  optionsSuccessStatus: 204,  // Standard preflight response
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -61,8 +88,8 @@ app.use('/api/tabs', tabsRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'Vibes Lounge API is running',
     timestamp: new Date().toISOString(),
     socketEnabled: true,
@@ -77,7 +104,7 @@ app.get('/api/health', (req, res) => {
 
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({ 
+  res.status(404).json({
     success: false,
     message: 'Route not found',
     requestedPath: req.path
@@ -87,9 +114,9 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err.stack);
-  res.status(err.status || 500).json({ 
+  res.status(err.status || 500).json({
     success: false,
-    message: 'Something went wrong!', 
+    message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
   });
 });
