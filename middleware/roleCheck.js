@@ -1,18 +1,22 @@
-const checkRole = (...roles) => {
-    return (req, res, next) => {
-      if (!req.user) {
-        return res.status(401).json({ message: 'Not authenticated' });
-      }
-  
-      if (!roles.includes(req.user.role)) {
-        return res.status(403).json({ 
-          message: `Access denied. Required role: ${roles.join(' or ')}` 
-        });
-      }
-  
-      next();
-    };
+// Role-based access control middleware
+const checkRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Access denied. ${allowedRoles.join(' or ')} role required.`
+      });
+    }
+
+    next();
   };
-  
-  module.exports = { checkRole };
-  
+};
+
+module.exports = { checkRole };

@@ -2,43 +2,57 @@ const Sale = require('../models/Sale');
 const Product = require('../models/Product');
 const mongoose = require('mongoose');
 
-// @desc    Create multi-item sale (no transaction for local Mongo)
+// ===============================
+// @desc    Create multi-item sale (supports split payment)
+// ===============================
 const createSale = async (req, res) => {
   try {
-    const { items, paymentMethod } = req.body;
+    const { items, paymentMethods } = req.body;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    // Validation
+    // ===== VALIDATION =====
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Items array required' });
     }
-    if (!['cash', 'mpesa'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid payment method' });
+
+    if (!paymentMethods || typeof paymentMethods !== 'object') {
+      return res.status(400).json({ message: 'Payment methods required' });
     }
 
-    // Pre-validate all items before processing any
+    const cashAmount = parseFloat(paymentMethods.cash) || 0;
+    const mpesaAmount = parseFloat(paymentMethods.mpesa) || 0;
+
+    if (cashAmount < 0 || mpesaAmount < 0) {
+      return res.status(400).json({ message: 'Payment amounts cannot be negative' });
+    }
+
+    if (cashAmount === 0 && mpesaAmount === 0) {
+      return res.status(400).json({ message: 'At least one payment method required' });
+    }
+
+    // ===== ITEM VALIDATION =====
     const validatedItems = [];
+
     for (const item of items) {
       const { productId, quantity } = item;
-      
+
       if (!mongoose.Types.ObjectId.isValid(productId)) {
         return res.status(400).json({ message: `Invalid product ID: ${productId}` });
       }
-      
+
       if (!quantity || quantity < 1) {
         return res.status(400).json({ message: 'Quantity must be at least 1' });
       }
 
       const product = await Product.findById(productId);
-      
       if (!product) {
         return res.status(404).json({ message: `Product not found: ${productId}` });
       }
-      
+
       if (product.quantity < quantity) {
-        return res.status(400).json({ 
-          message: `Insufficient stock for ${product.name}. Available: ${product.quantity}, Requested: ${quantity}` 
+        return res.status(400).json({
+          message: `Insufficient stock for ${product.name}. Available: ${product.quantity}, Requested: ${quantity}`
         });
       }
 
@@ -52,51 +66,70 @@ const createSale = async (req, res) => {
       });
     }
 
-    // All items validated, now process them
+    // ===== SALE CREATION =====
+    const totalSaleAmount = validatedItems.reduce((sum, i) => sum + i.totalPrice, 0);
     const createdSales = [];
 
     for (const item of validatedItems) {
       const { product, quantity, unitPrice, buyingPrice, totalPrice, profit } = item;
 
-      // Create sale record
+      const proportionalCash = cashAmount * (totalPrice / totalSaleAmount);
+      const proportionalMpesa = mpesaAmount * (totalPrice / totalSaleAmount);
+
       const sale = await Sale.create({
         productId: product._id,
         productName: product.name,
         quantitySold: quantity,
         unitPrice,
         totalPrice,
-        paymentMethod,
+        paymentMethods: {
+          cash: proportionalCash,
+          mpesa: proportionalMpesa
+        },
         buyingPrice,
-        sellingPrice: unitPrice,
         profit,
         soldBy: userId,
         soldByRole: userRole,
       });
 
-      // Update product stock
+      // Update stock
       product.quantity -= quantity;
       await product.save();
 
       createdSales.push(sale);
     }
+    const io = req.app.get('io');
+if (io) {
+  io.emit('saleCreated', {
+    sales: createdSales,
+    summary: {
+      totalRevenue: createdSales.reduce((sum, s) => sum + s.totalPrice, 0),
+      totalProfit: createdSales.reduce((sum, s) => sum + s.profit, 0),
+      totalItems: createdSales.reduce((sum, s) => sum + s.quantitySold, 0),
+    }
+  });
+}
 
-    res.status(201).json({ 
-      success: true, 
-      count: createdSales.length, 
+
+    res.status(201).json({
+      success: true,
+      count: createdSales.length,
       data: createdSales,
       message: 'Sale completed successfully'
     });
 
   } catch (error) {
     console.error('Create sale error:', error);
-    res.status(500).json({ 
-      message: 'Server error creating sale', 
-      error: error.message 
+    res.status(500).json({
+      message: 'Server error creating sale',
+      error: error.message
     });
   }
 };
 
-// Get manager's sales today
+// ===============================
+// @desc    Get manager's sales today
+// ===============================
 const getTodaySales = async (req, res) => {
   try {
     const todayStart = new Date();
@@ -108,18 +141,20 @@ const getTodaySales = async (req, res) => {
       soldBy: req.user._id,
       createdAt: { $gte: todayStart, $lte: todayEnd }
     })
-    .populate('productId', 'name')
-    .sort({ createdAt: -1 })
-    .lean(); // Use lean() for better performance
+      .populate('productId', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
 
-    res.json({ success: true, count: sales.length, sales: sales });
+    res.json({ success: true, count: sales.length, sales });
   } catch (error) {
     console.error('Get today sales error:', error);
     res.status(500).json({ message: 'Server error fetching sales' });
   }
 };
 
-// Get manager's today profit total
+// ===============================
+// @desc    Get manager's total profit today
+// ===============================
 const getTodayProfit = async (req, res) => {
   try {
     const todayStart = new Date();
@@ -128,17 +163,17 @@ const getTodayProfit = async (req, res) => {
     todayEnd.setHours(23, 59, 59, 999);
 
     const totalProfit = await Sale.aggregate([
-      { 
-        $match: { 
-          soldBy: mongoose.Types.ObjectId(req.user._id), 
-          createdAt: { $gte: todayStart, $lte: todayEnd } 
-        } 
+      {
+        $match: {
+          soldBy: new mongoose.Types.ObjectId(req.user._id),
+          createdAt: { $gte: todayStart, $lte: todayEnd }
+        }
       },
-      { 
-        $group: { 
-          _id: null, 
-          totalProfit: { $sum: '$profit' } 
-        } 
+      {
+        $group: {
+          _id: null,
+          totalProfit: { $sum: '$profit' }
+        }
       }
     ]);
 
@@ -150,7 +185,9 @@ const getTodayProfit = async (req, res) => {
   }
 };
 
-// Get all sales (admin) with date filters
+// ===============================
+// @desc    Get all sales (admin) with optional date filters
+// ===============================
 const getAllSales = async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query;
@@ -161,6 +198,7 @@ const getAllSales = async (req, res) => {
       from.setHours(0, 0, 0, 0);
       filter.createdAt = { $gte: from };
     }
+
     if (dateTo) {
       const to = new Date(dateTo);
       to.setHours(23, 59, 59, 999);
@@ -180,7 +218,9 @@ const getAllSales = async (req, res) => {
   }
 };
 
-// Get analytics (last 7 days revenue/profit by day)
+// ===============================
+// @desc    Get analytics (last 7 days revenue/profit by day)
+// ===============================
 const getAnalytics = async (req, res) => {
   try {
     const sevenDaysAgo = new Date();
@@ -195,6 +235,7 @@ const getAnalytics = async (req, res) => {
             $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
           },
           totalRevenue: { $sum: '$totalPrice' },
+          
           totalProfit: { $sum: '$profit' },
           salesCount: { $sum: 1 }
         }
@@ -215,6 +256,58 @@ const getAnalytics = async (req, res) => {
   } catch (error) {
     console.error('Get analytics error:', error);
     res.status(500).json({ message: 'Server error fetching analytics' });
+  }
+};
+// ===============================
+// @desc    Delete a sale (admin/manager only) and reverse stock
+// ===============================
+const deleteSale = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Validate ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid sale ID' });
+    }
+
+    // Find the sale and populate product
+    const sale = await Sale.findById(id).populate('productId');
+    if (!sale) {
+      return res.status(404).json({ message: 'Sale not found' });
+    }
+
+    // Permission check (admin or manager)
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+      return res.status(403).json({ message: 'Insufficient permissions to delete sales' });
+    }
+
+    // Reverse stock: Add quantity back to product
+    if (sale.productId) {
+      sale.productId.quantity += sale.quantitySold;
+      await sale.productId.save();
+    }
+
+    // Delete the sale
+    await Sale.findByIdAndDelete(id);
+
+    // Optional: Emit socket event for real-time UI updates
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('saleDeleted', { 
+        saleId: id, 
+        productId: sale.productId?._id,
+        quantityReturned: sale.quantitySold 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: `Sale deleted. ${sale.quantitySold} units returned to stock for ${sale.productName}.` 
+    });
+
+  } catch (error) {
+    console.error('Delete sale error:', error);
+    res.status(500).json({ message: 'Server error deleting sale' });
   }
 };
 

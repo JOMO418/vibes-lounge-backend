@@ -1,4 +1,3 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
@@ -10,14 +9,14 @@ const { emitSaleCreated, emitStockUpdated, emitProfitUpdated } = require('../soc
 const router = express.Router();
 
 // @route   POST /api/sales
-// @desc    Create new sale (multi-item cart)
+// @desc    Create new sale (multi-item cart with split payment)
 // @access  Private (Admin & Manager)
 router.post('/', protect, async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   
   try {
-    const { items, paymentMethod } = req.body;
+    const { items, paymentMethods } = req.body;
     
     // Validate input
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -28,23 +27,44 @@ router.post('/', protect, async (req, res) => {
       });
     }
     
-    if (!paymentMethod || !['cash', 'mpesa'].includes(paymentMethod)) {
+    // Validate payment methods
+    if (!paymentMethods || typeof paymentMethods !== 'object') {
       await session.abortTransaction();
       return res.status(400).json({ 
         success: false, 
-        message: 'Invalid payment method' 
+        message: 'Payment methods required' 
+      });
+    }
+    
+    const cashAmount = parseFloat(paymentMethods.cash) || 0;
+    const mpesaAmount = parseFloat(paymentMethods.mpesa) || 0;
+    
+    if (cashAmount < 0 || mpesaAmount < 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Payment amounts cannot be negative' 
+      });
+    }
+    
+    if (cashAmount === 0 && mpesaAmount === 0) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        success: false, 
+        message: 'At least one payment method required' 
       });
     }
     
     const salesRecords = [];
     let totalRevenue = 0;
     let totalProfit = 0;
+    let cartTotal = 0;
     
-    // Process each item in cart
+    // First pass: validate all items and calculate cart total
+    const validatedItems = [];
     for (const item of items) {
       const { productId, quantity } = item;
       
-      // Get product
       const product = await Product.findById(productId).session(session);
       
       if (!product) {
@@ -55,7 +75,6 @@ router.post('/', protect, async (req, res) => {
         });
       }
       
-      // Check stock
       if (product.quantity < quantity) {
         await session.abortTransaction();
         return res.status(400).json({ 
@@ -64,10 +83,36 @@ router.post('/', protect, async (req, res) => {
         });
       }
       
-      // Calculate prices
-      const unitPrice = product.price;
-      const totalPrice = unitPrice * quantity;
-      const buyingPrice = product.costPrice;
+      const itemTotal = product.price * quantity;
+      cartTotal += itemTotal;
+      
+      validatedItems.push({
+        product,
+        quantity,
+        itemTotal,
+        unitPrice: product.price,
+        buyingPrice: product.costPrice
+      });
+    }
+    
+    // Validate payment matches cart total
+    const totalPaid = cashAmount + mpesaAmount;
+    if (Math.abs(totalPaid - cartTotal) > 0.01) {
+      await session.abortTransaction();
+      return res.status(400).json({ 
+        success: false, 
+        message: `Payment mismatch. Cart total: ${cartTotal.toFixed(2)}, Paid: ${totalPaid.toFixed(2)}` 
+      });
+    }
+    
+    // Second pass: create sales and update stock
+    for (const item of validatedItems) {
+      const { product, quantity, itemTotal, unitPrice, buyingPrice } = item;
+      
+      // Calculate proportional payment split for this item
+      const itemCashAmount = cartTotal > 0 ? (itemTotal / cartTotal) * cashAmount : 0;
+      const itemMpesaAmount = cartTotal > 0 ? (itemTotal / cartTotal) * mpesaAmount : 0;
+      
       const profit = (unitPrice - buyingPrice) * quantity;
       
       // Create sale record
@@ -76,8 +121,11 @@ router.post('/', protect, async (req, res) => {
         productName: product.name,
         quantitySold: quantity,
         unitPrice,
-        totalPrice,
-        paymentMethod,
+        totalPrice: itemTotal,
+        paymentMethods: {
+          cash: Math.round(itemCashAmount * 100) / 100,
+          mpesa: Math.round(itemMpesaAmount * 100) / 100
+        },
         buyingPrice,
         sellingPrice: unitPrice,
         profit,
@@ -91,65 +139,52 @@ router.post('/', protect, async (req, res) => {
       product.quantity -= quantity;
       await product.save({ session });
       
-      totalRevenue += totalPrice;
+      totalRevenue += itemTotal;
       totalProfit += profit;
     }
     
     await session.commitTransaction();
 
-    // ============================================
-    // SOCKET.IO REAL-TIME UPDATES (NEW!)
-    // ============================================
-    
-    // Get io instance
+    // Socket.IO real-time updates
     const io = req.app.get('io');
+    if (io) {
+      emitSaleCreated(io, {
+        sales: salesRecords,
+        summary: {
+          totalItems: items.length,
+          totalRevenue,
+          totalProfit,
+          paymentMethods: { cash: cashAmount, mpesa: mpesaAmount }
+        }
+      });
 
-    // 1. Emit sale created event
-    emitSaleCreated(io, {
-      sales: salesRecords,
-      summary: {
-        totalItems: items.length,
-        totalRevenue,
-        totalProfit,
-        paymentMethod
+      for (const item of validatedItems) {
+        emitStockUpdated(io, {
+          productId: item.product._id,
+          productName: item.product.name,
+          newQuantity: item.product.quantity
+        });
       }
-    });
 
-    // 2. Emit stock updates for affected products
-    for (const item of items) {
-      const product = await Product.findById(item.productId);
-      emitStockUpdated(io, {
-        productId: product._id,
-        productName: product.name,
-        newQuantity: product.quantity
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      
+      const profitData = await Sale.aggregate([
+        { $match: { createdAt: { $gte: startOfDay } } },
+        {
+          $group: {
+            _id: null,
+            totalProfit: { $sum: '$profit' },
+            totalRevenue: { $sum: '$totalPrice' }
+          }
+        }
+      ]);
+
+      emitProfitUpdated(io, {
+        todayProfit: profitData[0]?.totalProfit || 0,
+        todayRevenue: profitData[0]?.totalRevenue || 0
       });
     }
-
-    // 3. Calculate and emit today's profit
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    
-    const profitData = await Sale.aggregate([
-      { 
-        $match: { 
-          createdAt: { $gte: startOfDay } 
-        } 
-      },
-      {
-        $group: {
-          _id: null,
-          totalProfit: { $sum: '$profit' },
-          totalRevenue: { $sum: '$totalPrice' }
-        }
-      }
-    ]);
-
-    emitProfitUpdated(io, {
-      todayProfit: profitData[0]?.totalProfit || 0,
-      todayRevenue: profitData[0]?.totalRevenue || 0
-    });
-    
-    // ============================================
     
     res.status(201).json({
       success: true,
@@ -159,7 +194,7 @@ router.post('/', protect, async (req, res) => {
         totalItems: items.length,
         totalRevenue,
         totalProfit,
-        paymentMethod
+        paymentMethods: { cash: cashAmount, mpesa: mpesaAmount }
       }
     });
   } catch (error) {
@@ -167,7 +202,8 @@ router.post('/', protect, async (req, res) => {
     console.error('Create sale error:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error processing sale' 
+      message: 'Error processing sale',
+      error: error.message 
     });
   } finally {
     session.endSession();
@@ -307,9 +343,13 @@ router.get('/all', protect, checkRole('admin'), async (req, res) => {
       }
     }
     
-    // Payment method filter
+    // Payment method filter (handle split payments)
     if (paymentMethod && paymentMethod !== 'all') {
-      query.paymentMethod = paymentMethod;
+      if (paymentMethod === 'cash') {
+        query['paymentMethods.cash'] = { $gt: 0 };
+      } else if (paymentMethod === 'mpesa') {
+        query['paymentMethods.mpesa'] = { $gt: 0 };
+      }
     }
     
     // Search by product name
