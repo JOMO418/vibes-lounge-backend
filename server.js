@@ -1,5 +1,3 @@
-
-
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -16,24 +14,14 @@ const tabsRoutes = require('./routes/tabs');
 
 const app = express();
 
-// Create HTTP server (IMPORTANT: we use http.createServer now)
+// Create HTTP server
 const server = http.createServer(app);
 
-// Setup Socket.io with CORS
+// FIXED: Simple array-based CORS for Socket.io
 const io = new Server(server, {
   cors: {
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      const allowedOrigins = [
-        process.env.FRONTEND_URL || 'https://vibeslounge.netlify.app',
-        'http://localhost:3000',
-      ];
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error('Socket.io CORS: Origin not allowed'));
-    },
-    methods: ['GET', 'POST', 'OPTIONS'],  // Add OPTIONS for consistency
+    origin: ['https://vibeslounge.netlify.app', 'http://localhost:3000'],
+    methods: ['GET', 'POST'],
     credentials: true,
   },
 });
@@ -41,42 +29,30 @@ const io = new Server(server, {
 // Setup socket handlers
 setupSocket(io);
 
-// Make io accessible in routes (IMPORTANT!)
+// Make io accessible in routes
 app.set('io', io);
 
 // Connect to MongoDB
 connectDB();
 
-// Middleware
-// Explicit CORS config - handles preflight for prod, lenient for local
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests (e.g., curl, mobile)
-    if (!origin) return callback(null, true);
-    // Use FRONTEND_URL env (Render-loaded) + local fallback
-    const allowedOrigins = [
-      process.env.FRONTEND_URL || 'https://vibeslounge.netlify.app',  // Prod Netlify
-      'https://vibes-lounge.netlify.app',  // Alt/duplicate from Socket.io
-      'http://localhost:3000',  // Local frontend
-    ];
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    console.warn(`CORS blocked origin: ${origin}`);  // Log for debugging
-    return callback(new Error(`CORS: Origin ${origin} not allowed`));
-  },
-  credentials: true,  // Supports Authorization Bearer tokens (your JWT)
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],  // Explicit for preflight (OPTIONS auto-handled)
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],  // JSON + future headers
-  preflightContinue: false,  // Let cors handle OPTIONS
-  optionsSuccessStatus: 204,  // Standard preflight response
-}));
+// FIXED: Simple array-based CORS middleware
+const corsOptions = {
+  origin: ['https://vibeslounge.netlify.app', 'http://localhost:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Handle preflight for all routes
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Log all requests (optional - helps with debugging)
 app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
+  console.log(`${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
   next();
 });
 
@@ -121,7 +97,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server (IMPORTANT: use 'server' not 'app')
+// Start server
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
@@ -131,6 +107,7 @@ server.listen(PORT, () => {
   console.log(`🔌 Socket.io: ENABLED ✅`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Health Check: http://localhost:${PORT}/api/health`);
+  console.log(`🔐 CORS: https://vibeslounge.netlify.app, http://localhost:3000`);
   console.log('='.repeat(50));
   console.log('\n📚 Available Endpoints:');
   console.log(`   POST   /api/auth/login`);
