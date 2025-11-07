@@ -487,5 +487,97 @@ router.get('/analytics', protect, checkRole('admin'), async (req, res) => {
     });
   }
 });
+// @route   DELETE /api/sales/:id
+// @desc    Delete sale and reverse stock
+// @access  Private/Admin
+router.delete('/:id', protect, checkRole('admin'), async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  try {
+    const { id } = req.params;
+    
+    // Find the sale
+    const sale = await Sale.findById(id).session(session);
+    if (!sale) {
+      await session.abortTransaction();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Sale not found' 
+      });
+    }
+    
+    // Find the product
+    const product = await Product.findById(sale.productId).session(session);
+    if (!product) {
+      await session.abortTransaction();
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Product not found' 
+      });
+    }
+    
+    // Reverse stock
+    product.quantity += sale.quantitySold;
+    await product.save({ session });
+    
+    // Delete sale
+    await Sale.findByIdAndDelete(id).session(session);
+    
+    await session.commitTransaction();
+    
+    // Socket.IO real-time update
+    const io = req.app.get('io');
+    if (io) {
+      emitStockUpdated(io, {
+        productId: product._id,
+        productName: product.name,
+        newQuantity: product.quantity
+      });
+      
+      // Recalculate today's profit
+      const startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      
+      const profitData = await Sale.aggregate([
+        { $match: { createdAt: { $gte: startOfDay } } },
+        {
+          $group: {
+            _id: null,
+            totalProfit: { $sum: '$profit' },
+            totalRevenue: { $sum: '$totalPrice' }
+          }
+        }
+      ]);
+      
+      emitProfitUpdated(io, {
+        todayProfit: profitData[0]?.totalProfit || 0,
+        todayRevenue: profitData[0]?.totalRevenue || 0
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Transaction deleted. ${sale.quantitySold} unit(s) returned to ${sale.productName}`,
+      data: {
+        deletedSaleId: id,
+        productName: sale.productName,
+        quantityReturned: sale.quantitySold,
+        newStockLevel: product.quantity
+      }
+    });
+    
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Delete sale error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error deleting sale',
+      error: error.message 
+    });
+  } finally {
+    session.endSession();
+  }
+});
 
 module.exports = router;
