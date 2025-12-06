@@ -72,7 +72,7 @@ router.get('/:id', async (req, res) => {
 // @route   POST /api/products
 // @desc    Create new product
 // @access  Private/Admin only
-router.post('/', protect, checkRole('admin'), async (req, res) => {
+router.post('/', protect, checkRole('admin','manager'), async (req, res) => {
   try {
     const { name, category, price, costPrice, quantity, description, imageUrl } = req.body;
     
@@ -129,8 +129,8 @@ router.post('/', protect, checkRole('admin'), async (req, res) => {
 
 // @route   PUT /api/products/:id
 // @desc    Update product
-// @access  Private/Admin only
-router.put('/:id', protect, checkRole('admin'), async (req, res) => {
+
+router.put('/:id', protect, checkRole('admin','manager'), async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     
