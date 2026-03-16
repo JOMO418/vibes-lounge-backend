@@ -38,16 +38,11 @@ router.post('/register', protect, checkRole('admin'), async (req, res) => {
       });
     }
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create new user
-    const user = await User.create({
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      role: role || 'manager',
-    });
+   const user = await User.create({
+  email: email.toLowerCase(),
+  password: password, // do not hash here — schema will do it
+  role: role || 'manager',
+});
 
     res.status(201).json({
       success: true,

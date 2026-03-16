@@ -17,10 +17,18 @@ const app = express();
 // Create HTTP server
 const server = http.createServer(app);
 
-// FIXED: Simple array-based CORS for Socket.io
+// ✅ FIXED: Unified allowed origins for both Express and Socket.io
+const allowedOrigins = [
+  'https://vibeslounge.netlify.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://localhost:3002', // fallback in case port shifts again
+];
+
+// ✅ Socket.io CORS — uses same allowed origins
 const io = new Server(server, {
   cors: {
-    origin: ['https://vibeslounge.netlify.app', 'http://localhost:3000'],
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -35,13 +43,13 @@ app.set('io', io);
 // Connect to MongoDB
 connectDB();
 
-// FIXED: Simple array-based CORS middleware
+// ✅ Express CORS — uses same allowed origins
 const corsOptions = {
-  origin: ['https://vibeslounge.netlify.app', 'http://localhost:3000'],
+  origin: allowedOrigins,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
 };
 
 app.use(cors(corsOptions));
@@ -50,7 +58,7 @@ app.options('*', cors(corsOptions)); // Handle preflight for all routes
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Log all requests (optional - helps with debugging)
+// Log all requests (helps with debugging)
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
   next();
@@ -73,8 +81,8 @@ app.get('/api/health', (req, res) => {
       auth: '/api/auth',
       products: '/api/products',
       sales: '/api/sales',
-      tabs: '/api/tabs'
-    }
+      tabs: '/api/tabs',
+    },
   });
 });
 
@@ -83,7 +91,7 @@ app.use((req, res) => {
   res.status(404).json({
     success: false,
     message: 'Route not found',
-    requestedPath: req.path
+    requestedPath: req.path,
   });
 });
 
@@ -93,7 +101,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
     success: false,
     message: 'Something went wrong!',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error'
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Internal server error',
   });
 });
 
@@ -107,7 +115,7 @@ server.listen(PORT, () => {
   console.log(`🔌 Socket.io: ENABLED ✅`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Health Check: http://localhost:${PORT}/api/health`);
-  console.log(`🔐 CORS: https://vibeslounge.netlify.app, http://localhost:3000`);
+  console.log(`🔐 CORS Origins: ${allowedOrigins.join(', ')}`);
   console.log('='.repeat(50));
   console.log('\n📚 Available Endpoints:');
   console.log(`   POST   /api/auth/login`);
